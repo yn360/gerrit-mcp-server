@@ -116,5 +116,65 @@ class TestListChangeComments(unittest.TestCase):
         asyncio.run(run_test())
 
 
+    @patch("gerrit_mcp_server.main.run_curl", new_callable=AsyncMock)
+    def test_list_change_comments_shows_comment_id(self, mock_run_curl):
+        """Tests that comment IDs are included in the output for use with reply_to_comment."""
+        async def run_test():
+            change_id = "99001"
+            mock_response = {
+                "src/foo.py": [
+                    {
+                        "id": "deadbeef01",
+                        "line": 42,
+                        "author": {"name": "reviewer@example.com"},
+                        "message": "Needs a test.",
+                        "unresolved": True,
+                        "updated": "2025-09-01T08:00:00Z",
+                    }
+                ]
+            }
+            mock_run_curl.return_value = json.dumps(mock_response)
+
+            result = await main.list_change_comments(
+                change_id, gerrit_base_url="https://my-gerrit.com"
+            )
+
+            self.assertIn("(id: deadbeef01)", result[0]["text"])
+            self.assertIn(
+                "L42: [reviewer@example.com] (2025-09-01T08:00:00Z) - UNRESOLVED  (id: deadbeef01)",
+                result[0]["text"],
+            )
+
+        asyncio.run(run_test())
+
+    @patch("gerrit_mcp_server.main.run_curl", new_callable=AsyncMock)
+    def test_list_change_comments_empty_id_when_missing(self, mock_run_curl):
+        """Tests that an empty id field does not cause errors."""
+        async def run_test():
+            change_id = "99002"
+            mock_response = {
+                "README.md": [
+                    {
+                        # No 'id' key in this comment
+                        "line": 1,
+                        "author": {"name": "author@example.com"},
+                        "message": "Great docs.",
+                        "unresolved": False,
+                        "updated": "2025-09-02T09:00:00Z",
+                    }
+                ]
+            }
+            mock_run_curl.return_value = json.dumps(mock_response)
+
+            result = await main.list_change_comments(
+                change_id, gerrit_base_url="https://my-gerrit.com"
+            )
+
+            self.assertIn("(id: )", result[0]["text"])
+            self.assertIn("L1: [author@example.com]", result[0]["text"])
+
+        asyncio.run(run_test())
+
+
 if __name__ == "__main__":
     unittest.main()

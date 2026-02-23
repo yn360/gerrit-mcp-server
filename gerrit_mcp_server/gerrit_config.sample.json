@@ -34,6 +34,13 @@
         "type": "git_cookies",
         "gitcookies_path": "~/.gitcookies"
       }
+    },
+    {
+      "name": "GerritRC - API Key",
+      "external_url": "https://gerrit.your-domain.tech/a/",
+      "authentication": {
+        "type": "gerritrc"
+      }
     }
   ]
 }

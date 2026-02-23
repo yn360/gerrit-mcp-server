@@ -21,6 +21,11 @@ from unittest.mock import patch, mock_open
 from gerrit_mcp_server import gerrit_auth
 
 
+def _clean_cache(session_id: str) -> None:
+    """Helper: remove a session entry from the in-process cache."""
+    gerrit_auth._credentials_cache.pop(session_id, None)
+
+
 class TestGerritAuth(unittest.TestCase):
 
     def test_get_auth_for_gob(self):
@@ -83,6 +88,89 @@ class TestGerritAuth(unittest.TestCase):
         with patch("builtins.open", m):
             command = gerrit_auth._get_auth_for_gitcookies(url, config)
         self.assertEqual(command, ["curl", "-b", "o=git-lasttoken", "-L"])
+
+
+    # --- gerritrc auth tests ---
+
+    def test_store_gerritrc_credentials_caches_by_session(self):
+        """Tests that credentials are stored under the current session_id."""
+        sid = "unit-test-session-store"
+        _clean_cache(sid)
+        token = gerrit_auth.session_id_var.set(sid)
+        try:
+            with patch("builtins.open", mock_open()):
+                gerrit_auth.store_gerritrc_credentials("alice", "s3cr3t")
+            self.assertEqual(
+                gerrit_auth._credentials_cache.get(sid),
+                {"username": "alice", "api_key": "s3cr3t"},
+            )
+        finally:
+            gerrit_auth.session_id_var.reset(token)
+            _clean_cache(sid)
+
+    def test_store_gerritrc_credentials_overwrites_previous(self):
+        """Tests that storing credentials twice replaces the old entry."""
+        sid = "unit-test-session-overwrite"
+        _clean_cache(sid)
+        token = gerrit_auth.session_id_var.set(sid)
+        try:
+            with patch("builtins.open", mock_open()):
+                gerrit_auth.store_gerritrc_credentials("alice", "first")
+                gerrit_auth.store_gerritrc_credentials("alice", "second")
+            self.assertEqual(
+                gerrit_auth._credentials_cache[sid]["api_key"], "second"
+            )
+        finally:
+            gerrit_auth.session_id_var.reset(token)
+            _clean_cache(sid)
+
+    def test_get_auth_for_gerritrc_returns_curl_command(self):
+        """Tests that _get_auth_for_gerritrc returns the correct curl command."""
+        sid = "unit-test-session-lookup"
+        gerrit_auth._credentials_cache[sid] = {"username": "bob", "api_key": "topsecret"}
+        token = gerrit_auth.session_id_var.set(sid)
+        try:
+            with patch("builtins.open", mock_open()):
+                result = gerrit_auth._get_auth_for_gerritrc()
+            self.assertEqual(result, ["curl", "--user", "bob:topsecret", "-L"])
+        finally:
+            gerrit_auth.session_id_var.reset(token)
+            _clean_cache(sid)
+
+    def test_get_auth_for_gerritrc_raises_when_no_credentials(self):
+        """Tests that _get_auth_for_gerritrc raises ValueError when no creds cached."""
+        sid = "unit-test-session-missing"
+        _clean_cache(sid)
+        token = gerrit_auth.session_id_var.set(sid)
+        try:
+            with patch("builtins.open", mock_open()):
+                with self.assertRaisesRegex(ValueError, "No credentials cached"):
+                    gerrit_auth._get_auth_for_gerritrc()
+        finally:
+            gerrit_auth.session_id_var.reset(token)
+
+    def test_sessions_are_isolated(self):
+        """Tests that credentials from one session are not visible in another."""
+        sid_a = "unit-test-session-a"
+        sid_b = "unit-test-session-b"
+        _clean_cache(sid_a)
+        _clean_cache(sid_b)
+
+        token_a = gerrit_auth.session_id_var.set(sid_a)
+        try:
+            with patch("builtins.open", mock_open()):
+                gerrit_auth.store_gerritrc_credentials("userA", "passA")
+        finally:
+            gerrit_auth.session_id_var.reset(token_a)
+
+        token_b = gerrit_auth.session_id_var.set(sid_b)
+        try:
+            with patch("builtins.open", mock_open()):
+                with self.assertRaisesRegex(ValueError, "No credentials cached"):
+                    gerrit_auth._get_auth_for_gerritrc()
+        finally:
+            gerrit_auth.session_id_var.reset(token_b)
+            _clean_cache(sid_a)
 
 
 if __name__ == "__main__":

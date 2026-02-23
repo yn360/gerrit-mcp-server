@@ -21,17 +21,16 @@ from typing import List, Dict, Any
 from gerrit_mcp_server import gerrit_auth
 
 
-def get_curl_command_for_gerrit_url(
+def _find_auth_config(
     gerrit_base_url: str, config: Dict[str, Any]
-) -> List[str]:
-    """
-    Determines the appropriate curl command based on the authentication settings
-    for the given Gerrit host.
+) -> Dict[str, Any]:
+    """Return the authentication config block for the matching Gerrit host.
+
+    Raises:
+        ValueError: If no host in the config matches ``gerrit_base_url``.
     """
     gerrit_hosts = config.get("gerrit_hosts", [])
-    auth_config = None
-
-    stripped_gerrit_base_url = (
+    stripped = (
         gerrit_base_url.replace("https://", "").replace("http://", "").rstrip("/")
     )
 
@@ -48,19 +47,25 @@ def get_curl_command_for_gerrit_url(
             .replace("http://", "")
             .rstrip("/")
         )
-        if (
-            stripped_gerrit_base_url == internal_url
-            or stripped_gerrit_base_url == external_url
-        ):
-            auth_config = host.get("authentication")
-            break
+        if stripped == internal_url or stripped == external_url:
+            return host.get("authentication") or {}
 
-    if auth_config is None:
-        raise ValueError(
-            f"No configured Gerrit host found for URL: {gerrit_base_url}. "
-            f"Please check your gerrit_config.json file."
-        )
+    raise ValueError(
+        f"No configured Gerrit host found for URL: {gerrit_base_url}. "
+        "Please check your gerrit_config.json file."
+    )
 
+
+def get_curl_command_for_gerrit_url(
+    gerrit_base_url: str, config: Dict[str, Any]
+) -> List[str]:
+    """
+    Determines the appropriate curl command based on the authentication settings
+    for the given Gerrit host.
+
+    Handles: gob_curl, http_basic, git_cookies, gerritrc.
+    """
+    auth_config = _find_auth_config(gerrit_base_url, config)
     auth_type = auth_config.get("type")
 
     if auth_type == "gob_curl":
@@ -72,7 +77,18 @@ def get_curl_command_for_gerrit_url(
     if auth_type == "git_cookies":
         return gerrit_auth._get_auth_for_gitcookies(gerrit_base_url, auth_config)
 
+    if auth_type == "gerritrc":
+        return gerrit_auth._get_auth_for_gerritrc()
+
     raise ValueError(
         "No valid authentication method found in gerrit_config.json. "
-        "Please configure a supported 'type' (e.g., 'http_basic', 'gob_curl', 'git_cookies') for the relevant host."
+        "Please configure a supported 'type' (e.g., 'http_basic', 'gob_curl', "
+        "'git_cookies', 'gerritrc') for the relevant host."
     )
+
+
+async def get_curl_command_for_gerrit_url_async(
+    gerrit_base_url: str, config: Dict[str, Any]
+) -> List[str]:
+    """Async wrapper around ``get_curl_command_for_gerrit_url``."""
+    return get_curl_command_for_gerrit_url(gerrit_base_url, config)

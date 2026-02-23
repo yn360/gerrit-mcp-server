@@ -107,6 +107,25 @@ class TestGerritUrlsDispatcher(unittest.TestCase):
                 "https://fuchsia-review.googlesource.com", config
             )
 
+    @patch("gerrit_mcp_server.gerrit_auth._get_auth_for_gerritrc")
+    def test_dispatches_to_gerritrc(self, mock_get_auth):
+        """Tests that the dispatcher correctly calls the gerritrc auth function."""
+        mock_get_auth.return_value = ["curl", "--user", "user:pass", "-L"]
+        config = {
+            "gerrit_hosts": [
+                {
+                    "name": "GerritRC - API Key",
+                    "external_url": "https://gerrit.your-domain.tech/a/",
+                    "authentication": {"type": "gerritrc"},
+                }
+            ]
+        }
+        command = gerrit_urls.get_curl_command_for_gerrit_url(
+            "https://gerrit.your-domain.tech/a", config
+        )
+        mock_get_auth.assert_called_once_with()
+        self.assertEqual(command, ["curl", "--user", "user:pass", "-L"])
+
 
 if __name__ == "__main__":
     unittest.main()

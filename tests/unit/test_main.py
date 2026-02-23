@@ -237,6 +237,24 @@ async def test_get_change_details_handles_empty_reviewers_list(mock_run_curl):
     assert "Reviewers:" in result[0]["text"]
 
 @pytest.mark.asyncio
+async def test_gerrit_authenticate_stores_credentials():
+    """Tests that gerrit_authenticate calls store_gerritrc_credentials."""
+    with patch("gerrit_mcp_server.gerrit_auth.store_gerritrc_credentials") as mock_store:
+        result = await main.gerrit_authenticate("alice", "myapikey")
+        mock_store.assert_called_once_with("alice", "myapikey")
+        assert "Credentials stored" in result[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_gerrit_authenticate_returns_ready_message():
+    """Tests that the success message mentions readiness for API calls."""
+    with patch("gerrit_mcp_server.gerrit_auth.store_gerritrc_credentials"):
+        result = await main.gerrit_authenticate("bob", "secret")
+        assert result[0]["type"] == "text"
+        assert "Ready to make Gerrit API calls" in result[0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_list_change_files_handles_empty_response(mock_run_curl):
     """Tests that list_change_files handles an empty response gracefully."""
     mock_run_curl.side_effect = [

@@ -23,7 +23,11 @@ import os
 import datetime  # Added this import
 import argparse
 
-from gerrit_mcp_server.gerrit_urls import get_curl_command_for_gerrit_url
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from gerrit_mcp_server.gerrit_urls import get_curl_command_for_gerrit_url_async
 from gerrit_mcp_server.bug_utils import extract_bugs_from_commit_message
 from gerrit_mcp_server.sort_util import sort_changes_by_date
 from mcp.server.fastmcp import FastMCP
@@ -33,7 +37,8 @@ import mcp.types as types
 # Define paths outside the try block to ensure they are always initialized.
 PKG_PATH = Path(__file__).parent
 SERVER_ROOT_PATH = PKG_PATH.parent
-LOG_FILE_PATH = SERVER_ROOT_PATH / "server.log"
+_log_override = os.environ.get("GERRIT_LOG_FILE")
+LOG_FILE_PATH = Path(_log_override) if _log_override else SERVER_ROOT_PATH / "server.log"
 CONFIG_FILE_PATH = PKG_PATH / "gerrit_config.json"
 
 
@@ -100,7 +105,16 @@ except Exception as e:
     }
 
 # --- Initialize FastMCP Server ---
-mcp = FastMCP("gerrit")
+from mcp.server.transport_security import TransportSecuritySettings
+
+# Disable DNS-rebinding protection: the server is behind a K8s ingress that
+# enforces TLS and routing, so requests arrive with an external Host header
+# (e.g. gerrit-mcp.yektanet.tech) that would otherwise be rejected by the
+# default localhost-only allowlist.
+mcp = FastMCP(
+    "gerrit",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 # --- Session State ---
 
@@ -165,12 +179,23 @@ def _normalize_gerrit_url(url: str, gerrit_hosts: List[Dict[str, Any]]) -> str:
     return normalized_url.rstrip("/")
 
 
+def _redact_curl_command(cmd: List[str]) -> List[str]:
+    """Return a copy of cmd with the value after --user replaced by ***."""
+    redacted = list(cmd)
+    for i, part in enumerate(redacted):
+        if part == "--user" and i + 1 < len(redacted):
+            redacted[i + 1] = "***"
+        elif part == "-b" and i + 1 < len(redacted):
+            redacted[i + 1] = "***"
+    return redacted
+
+
 async def run_curl(args: List[str], gerrit_base_url: str) -> str:
     """Executes a curl command and returns the output."""
     config = load_gerrit_config()
-    command = get_curl_command_for_gerrit_url(gerrit_base_url, config) + args
+    command = await get_curl_command_for_gerrit_url_async(gerrit_base_url, config) + args
     with open(LOG_FILE_PATH, "a") as log_file:
-        log_file.write(f"[gerrit-mcp-server] Executing: {" ".join(command)}\n")
+        log_file.write(f"[gerrit-mcp-server] Executing: {' '.join(_redact_curl_command(command))}\n")
 
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -225,6 +250,23 @@ def _create_put_args(url: str, payload: Optional[Dict[str, Any]] = None) -> List
 
 
 # --- Tool Implementations ---
+
+
+@mcp.tool()
+async def gerrit_authenticate(
+    username: str,
+    api_key: str,
+):
+    """Provide Gerrit HTTP Basic credentials to the MCP server.
+
+    The server uses these credentials for all subsequent Gerrit API calls.
+    Credentials are stored in-process only (not persisted to disk).
+    """
+    from gerrit_mcp_server.gerrit_auth import store_gerritrc_credentials
+
+    store_gerritrc_credentials(username, api_key)
+
+    return [{"type": "text", "text": "Credentials stored. Ready to make Gerrit API calls."}]
 
 
 @mcp.tool()
@@ -537,7 +579,8 @@ async def list_change_comments(
             timestamp = comment.get("updated", "No date")
             message = comment["message"]
             status = "UNRESOLVED" if comment.get("unresolved", False) else "RESOLVED"
-            output += f"L{line}: [{author}] ({timestamp}) - {status}\n"
+            comment_id = comment.get("id", "")
+            output += f"L{line}: [{author}] ({timestamp}) - {status}  (id: {comment_id})\n"
             output += f"  {message}\n"
 
     if not found_comments:
@@ -1206,6 +1249,56 @@ async def post_review_comment(
         raise e
 
 
+@mcp.tool()
+async def reply_to_comment(
+    change_id: str,
+    comment_id: str,
+    message: str,
+    file_path: str = "/PATCHSET_LEVEL",
+    unresolved: bool = False,
+    gerrit_base_url: Optional[str] = None,
+):
+    """
+    Reply to an existing review comment on a CL.
+
+    By default (unresolved=False) the reply marks the thread as resolved.
+    Pass unresolved=True to add a note while keeping the thread open.
+    """
+    config = load_gerrit_config()
+    gerrit_hosts = config.get("gerrit_hosts", [])
+    base_url = _normalize_gerrit_url(_get_gerrit_base_url(gerrit_base_url), gerrit_hosts)
+    url = f"{base_url}/changes/{change_id}/revisions/current/review"
+
+    payload = {
+        "comments": {
+            file_path: [
+                {
+                    "in_reply_to": comment_id,
+                    "message": message,
+                    "unresolved": unresolved,
+                }
+            ]
+        }
+    }
+    args = _create_post_args(url, payload)
+
+    try:
+        result_str = await run_curl(args, base_url)
+        if '"labels"' in result_str or '"comments"' in result_str:
+            resolution = "resolved" if not unresolved else "kept open"
+            return [
+                {
+                    "type": "text",
+                    "text": f"Reply posted to comment {comment_id} on CL {change_id}. Thread {resolution}.",
+                }
+            ]
+        else:
+            return [{"type": "text", "text": f"Failed to post reply. Response: {result_str}"}]
+    except Exception as e:
+        with open(LOG_FILE_PATH, "a") as log_file:
+            log_file.write(f"[gerrit-mcp-server] Error replying to comment {comment_id} on CL {change_id}: {e}\n")
+        raise e
+
 
 def cli_main(argv: List[str]):
     """
@@ -1240,4 +1333,8 @@ def cli_main(argv: List[str]):
 if __name__ == "__main__":
     cli_main(sys.argv)
 
+async def _health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
 app = mcp.streamable_http_app()
+app.router.routes.insert(0, Route("/health", _health))
