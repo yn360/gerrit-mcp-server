@@ -1190,6 +1190,34 @@ async def get_bugs_from_cl(
     ]
 
 
+def _build_comment_entry(
+    file_path: str,
+    line_number: Optional[int],
+    message: str,
+    unresolved: bool,
+    comments_by_file: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build a single comment entry dict, adding in_reply_to if a thread exists at file/line.
+
+    Pass line_number=None for patchset-level or file-level comments (no line field sent to Gerrit).
+    """
+    entry: Dict[str, Any] = {"message": message, "unresolved": unresolved}
+    if line_number is not None:
+        entry["line"] = line_number
+    existing = [
+        c for c in comments_by_file.get(file_path, [])
+        if c.get("line") == line_number  # None == None for patchset-level
+    ]
+    if existing:
+        unresolved_existing = [c for c in existing if c.get("unresolved", False)]
+        thread_target = max(
+            unresolved_existing if unresolved_existing else existing,
+            key=lambda c: c.get("updated", ""),
+        )
+        entry["in_reply_to"] = thread_target["id"]
+    return entry
+
+
 @mcp.tool()
 async def post_review_comment(
     change_id: str,
@@ -1212,30 +1240,15 @@ async def post_review_comment(
     base_url = _normalize_gerrit_url(_get_gerrit_base_url(gerrit_base_url), gerrit_hosts)
     url = f"{base_url}/changes/{change_id}/revisions/current/review"
 
-    # Check for an existing comment thread at this file/line to reply into
-    comment_entry: Dict[str, Any] = {"line": line_number, "message": message, "unresolved": unresolved}
     try:
         comments_str = await run_curl([f"{base_url}/changes/{change_id}/comments"], base_url)
         comments_by_file = json.loads(comments_str)
-        existing = [
-            c for c in comments_by_file.get(file_path, [])
-            if c.get("line") == line_number
-        ]
-        if existing:
-            unresolved_existing = [c for c in existing if c.get("unresolved", False)]
-            thread_target = max(
-                unresolved_existing if unresolved_existing else existing,
-                key=lambda c: c.get("updated", ""),
-            )
-            comment_entry["in_reply_to"] = thread_target["id"]
     except Exception:
-        pass  # If we can't fetch existing comments, fall back to standalone comment
+        comments_by_file = {}
 
-    payload = {
-        "comments": {
-            file_path: [comment_entry]
-        },
-    }
+    comment_entry = _build_comment_entry(file_path, line_number, message, unresolved, comments_by_file)
+
+    payload: Dict[str, Any] = {"comments": {file_path: [comment_entry]}}
     if labels:
         payload["labels"] = labels
     
@@ -1263,6 +1276,66 @@ async def post_review_comment(
             log_file.write(
                 f"[gerrit-mcp-server] Error posting comment to CL {change_id}: {e}\n"
             )
+        raise e
+
+
+@mcp.tool()
+async def post_bulk_comments(
+    change_id: str,
+    comments: List[Dict[str, Any]],
+    labels: Optional[Dict[str, int]] = None,
+    gerrit_base_url: Optional[str] = None,
+):
+    """
+    Post multiple review comments on a CL in a single API call.
+
+    Each entry in `comments` must contain:
+      - file_path (str): path of the file to comment on. Use "/PATCHSET_LEVEL" for patchset-level comments.
+      - line_number (int, optional): line number in the file. Omit or set to null for patchset-level or file-level comments.
+      - message (str): comment text
+      - unresolved (bool, optional): whether the comment is unresolved (default: True)
+
+    If an existing unresolved thread is found at the same file/line, the comment is
+    automatically posted as a reply (in_reply_to) into that thread. Patchset-level
+    threads are matched when file_path is "/PATCHSET_LEVEL" and line_number is omitted.
+    """
+    config = load_gerrit_config()
+    gerrit_hosts = config.get("gerrit_hosts", [])
+    base_url = _normalize_gerrit_url(_get_gerrit_base_url(gerrit_base_url), gerrit_hosts)
+    url = f"{base_url}/changes/{change_id}/revisions/current/review"
+
+    try:
+        comments_str = await run_curl([f"{base_url}/changes/{change_id}/comments"], base_url)
+        comments_by_file = json.loads(comments_str)
+    except Exception:
+        comments_by_file = {}
+
+    comments_payload: Dict[str, List[Dict[str, Any]]] = {}
+    for c in comments:
+        file_path = c["file_path"]
+        raw_line = c.get("line_number")
+        line_number: Optional[int] = int(raw_line) if raw_line is not None else None
+        message = c["message"]
+        unresolved = bool(c.get("unresolved", True))
+        entry = _build_comment_entry(file_path, line_number, message, unresolved, comments_by_file)
+        comments_payload.setdefault(file_path, []).append(entry)
+
+    payload: Dict[str, Any] = {"comments": comments_payload}
+    if labels:
+        payload["labels"] = labels
+
+    args = _create_post_args(url, payload)
+
+    try:
+        result_str = await run_curl(args, base_url)
+        if '"done": true' in result_str or '"labels"' in result_str or '"comments"' in result_str:
+            total = sum(len(v) for v in comments_payload.values())
+            return [{"type": "text", "text": f"Successfully posted {total} comment(s) to CL {change_id}."}]
+        else:
+            return [{"type": "text", "text": f"Failed to post comments. Response: {result_str}"}]
+    except Exception as e:
+        with open(LOG_FILE_PATH, "a") as log_file:
+            log_file.write(f"[gerrit-mcp-server] Error posting bulk comments to CL {change_id}: {e}\n")
         raise e
 
 
