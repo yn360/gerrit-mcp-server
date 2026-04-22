@@ -1202,21 +1202,38 @@ async def post_review_comment(
 ):
     """
     Posts a review comment on a specific line of a file in a CL.
+
+    If an existing unresolved comment thread is found at the same file and line,
+    the comment is automatically posted as a reply to that thread (using in_reply_to).
+    Otherwise, a new standalone comment is created.
     """
     config = load_gerrit_config()
     gerrit_hosts = config.get("gerrit_hosts", [])
     base_url = _normalize_gerrit_url(_get_gerrit_base_url(gerrit_base_url), gerrit_hosts)
     url = f"{base_url}/changes/{change_id}/revisions/current/review"
 
+    # Check for an existing comment thread at this file/line to reply into
+    comment_entry: Dict[str, Any] = {"line": line_number, "message": message, "unresolved": unresolved}
+    try:
+        comments_str = await run_curl([f"{base_url}/changes/{change_id}/comments"], base_url)
+        comments_by_file = json.loads(comments_str)
+        existing = [
+            c for c in comments_by_file.get(file_path, [])
+            if c.get("line") == line_number
+        ]
+        if existing:
+            unresolved_existing = [c for c in existing if c.get("unresolved", False)]
+            thread_target = max(
+                unresolved_existing if unresolved_existing else existing,
+                key=lambda c: c.get("updated", ""),
+            )
+            comment_entry["in_reply_to"] = thread_target["id"]
+    except Exception:
+        pass  # If we can't fetch existing comments, fall back to standalone comment
+
     payload = {
         "comments": {
-            file_path: [
-                {
-                    "line": line_number,
-                    "message": message,
-                    "unresolved": unresolved,
-                }
-            ]
+            file_path: [comment_entry]
         },
     }
     if labels:
