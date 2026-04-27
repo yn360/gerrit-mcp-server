@@ -580,7 +580,21 @@ async def list_change_comments(
             message = comment["message"]
             status = "UNRESOLVED" if comment.get("unresolved", False) else "RESOLVED"
             comment_id = comment.get("id", "")
-            output += f"L{line}: [{author}] ({timestamp}) - {status}  (id: {comment_id})\n"
+            # Include character range when the comment targets a text selection
+            # within a line, so readers know it is NOT about the whole line.
+            range_info = comment.get("range")
+            if range_info:
+                sl = range_info.get("start_line", line)
+                el = range_info.get("end_line", line)
+                sc = range_info.get("start_character", 0)
+                ec = range_info.get("end_character", 0)
+                if sl == el:
+                    location = f"L{sl} (chars {sc}-{ec})"
+                else:
+                    location = f"L{sl}:{sc}-L{el}:{ec}"
+            else:
+                location = f"L{line}"
+            output += f"{location}: [{author}] ({timestamp}) - {status}  (id: {comment_id})\n"
             output += f"  {message}\n"
 
     if not found_comments:
@@ -1387,6 +1401,51 @@ async def reply_to_comment(
     except Exception as e:
         with open(LOG_FILE_PATH, "a") as log_file:
             log_file.write(f"[gerrit-mcp-server] Error replying to comment {comment_id} on CL {change_id}: {e}\n")
+        raise e
+
+
+@mcp.tool()
+async def submit_change(
+    change_id: str,
+    gerrit_base_url: Optional[str] = None,
+):
+    """
+    Submits (merges) a change. Gerrit enforces all submit requirements
+    server-side (e.g. Code-Review +2, Verified +1) and returns an error
+    if they are not met.
+    """
+    config = load_gerrit_config()
+    gerrit_hosts = config.get("gerrit_hosts", [])
+    base_url = _normalize_gerrit_url(_get_gerrit_base_url(gerrit_base_url), gerrit_hosts)
+    url = f"{base_url}/changes/{change_id}/submit"
+    args = _create_post_args(url)
+
+    try:
+        result_str = await run_curl(args, base_url)
+        change_info = json.loads(result_str)
+        if change_info.get("status") == "MERGED":
+            output = (
+                f"Successfully submitted CL {change_info['_number']}.\n"
+                f"Subject: {change_info['subject']}"
+            )
+            return [{"type": "text", "text": output}]
+        else:
+            return [
+                {
+                    "type": "text",
+                    "text": f"Failed to submit CL {change_id}. Response: {result_str}",
+                }
+            ]
+    except json.JSONDecodeError:
+        return [
+            {
+                "type": "text",
+                "text": f"Failed to submit CL {change_id}. Response: {result_str}",
+            }
+        ]
+    except Exception as e:
+        with open(LOG_FILE_PATH, "a") as log_file:
+            log_file.write(f"[gerrit-mcp-server] Error submitting CL {change_id}: {e}\n")
         raise e
 
 

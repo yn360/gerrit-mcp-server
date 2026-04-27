@@ -176,5 +176,77 @@ class TestListChangeComments(unittest.TestCase):
         asyncio.run(run_test())
 
 
+    @patch("gerrit_mcp_server.main.run_curl", new_callable=AsyncMock)
+    def test_list_change_comments_range_same_line(self, mock_run_curl):
+        """Range comment on a text selection within a single line shows char offsets."""
+        async def run_test():
+            change_id = "55001"
+            mock_response = {
+                "src/foo.py": [
+                    {
+                        "id": "rangeabc01",
+                        "line": 7,
+                        "range": {
+                            "start_line": 7,
+                            "end_line": 7,
+                            "start_character": 4,
+                            "end_character": 12,
+                        },
+                        "author": {"name": "reviewer@example.com"},
+                        "message": "Remove this word.",
+                        "unresolved": True,
+                        "updated": "2025-10-01T12:00:00Z",
+                    }
+                ]
+            }
+            mock_run_curl.return_value = json.dumps(mock_response)
+
+            result = await main.list_change_comments(
+                change_id, gerrit_base_url="https://my-gerrit.com"
+            )
+
+            text = result[0]["text"]
+            self.assertIn("L7 (chars 4-12)", text)
+            self.assertIn("Remove this word.", text)
+            self.assertIn("(id: rangeabc01)", text)
+
+        asyncio.run(run_test())
+
+    @patch("gerrit_mcp_server.main.run_curl", new_callable=AsyncMock)
+    def test_list_change_comments_range_multi_line(self, mock_run_curl):
+        """Range comment spanning multiple lines shows start/end line and char offsets."""
+        async def run_test():
+            change_id = "55002"
+            mock_response = {
+                "src/bar.py": [
+                    {
+                        "id": "rangexyz02",
+                        "line": 10,
+                        "range": {
+                            "start_line": 8,
+                            "end_line": 10,
+                            "start_character": 2,
+                            "end_character": 5,
+                        },
+                        "author": {"name": "reviewer@example.com"},
+                        "message": "Simplify this block.",
+                        "unresolved": True,
+                        "updated": "2025-10-02T08:00:00Z",
+                    }
+                ]
+            }
+            mock_run_curl.return_value = json.dumps(mock_response)
+
+            result = await main.list_change_comments(
+                change_id, gerrit_base_url="https://my-gerrit.com"
+            )
+
+            text = result[0]["text"]
+            self.assertIn("L8:2-L10:5", text)
+            self.assertIn("Simplify this block.", text)
+
+        asyncio.run(run_test())
+
+
 if __name__ == "__main__":
     unittest.main()

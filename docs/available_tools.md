@@ -49,3 +49,6 @@ This document lists the tools available in the Gerrit MCP Server, extracted from
     comment belongs to. By default (`unresolved=False`) the reply marks the
     thread as resolved; pass `unresolved=True` to add a note while keeping the
     thread open.
+-   **submit_change**: Submits (merges) a change. Gerrit enforces all submit
+    requirements server-side (Code-Review +2, Verified +1) and returns an error
+    if they are not met.
