@@ -547,6 +547,41 @@ async def get_file_diff(
 
 
 @mcp.tool()
+async def _fetch_file_lines(
+    base_url: str, change_id: str, file_path: str
+) -> Optional[List[str]]:
+    """Fetch file content from the latest revision and return as lines."""
+    encoded_path = file_path.replace("/", "%2F")
+    url = f"{base_url}/changes/{change_id}/revisions/current/files/{encoded_path}/content"
+    try:
+        content_b64 = await run_curl([url], base_url)
+        content = base64.b64decode(content_b64).decode("utf-8", errors="replace")
+        return content.splitlines()
+    except Exception:
+        return None
+
+
+def _extract_selected_text(
+    lines: List[str], range_info: dict
+) -> Optional[str]:
+    """Extract the reviewer-selected text from file lines using range info."""
+    sl = range_info.get("start_line", 0)
+    el = range_info.get("end_line", 0)
+    sc = range_info.get("start_character", 0)
+    ec = range_info.get("end_character", 0)
+    if sl <= 0 or el <= 0 or sl > len(lines) or el > len(lines):
+        return None
+    if sl == el:
+        line = lines[sl - 1]
+        return line[sc:ec] if ec <= len(line) else line[sc:]
+    selected = [lines[sl - 1][sc:]]
+    for i in range(sl, el - 1):
+        if i < len(lines):
+            selected.append(lines[i])
+    selected.append(lines[el - 1][:ec])
+    return "\n".join(selected)
+
+
 async def list_change_comments(
     change_id: str, gerrit_base_url: Optional[str] = None
 ):
@@ -568,6 +603,9 @@ async def list_change_comments(
             }
         ]
 
+    # Cache file content per file to avoid redundant fetches.
+    file_content_cache: Dict[str, Optional[List[str]]] = {}
+
     output = f"Comments for CL {change_id}:\n"
     found_comments = False
     for file_path, comments in comments_by_file.items():
@@ -583,6 +621,7 @@ async def list_change_comments(
             # Include character range when the comment targets a text selection
             # within a line, so readers know it is NOT about the whole line.
             range_info = comment.get("range")
+            selected_text = ""
             if range_info:
                 sl = range_info.get("start_line", line)
                 el = range_info.get("end_line", line)
@@ -592,9 +631,19 @@ async def list_change_comments(
                     location = f"L{sl} (chars {sc}-{ec})"
                 else:
                     location = f"L{sl}:{sc}-L{el}:{ec}"
+                # Fetch file content and extract the selected text.
+                if file_path not in file_content_cache:
+                    file_content_cache[file_path] = await _fetch_file_lines(
+                        base_url, change_id, file_path
+                    )
+                lines = file_content_cache[file_path]
+                if lines is not None:
+                    extracted = _extract_selected_text(lines, range_info)
+                    if extracted:
+                        selected_text = f' "{extracted}"'
             else:
                 location = f"L{line}"
-            output += f"{location}: [{author}] ({timestamp}) - {status}  (id: {comment_id})\n"
+            output += f"{location}{selected_text}: [{author}] ({timestamp}) - {status}  (id: {comment_id})\n"
             output += f"  {message}\n"
 
     if not found_comments:
