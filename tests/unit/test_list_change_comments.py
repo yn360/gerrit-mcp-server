@@ -178,10 +178,10 @@ class TestListChangeComments(unittest.TestCase):
 
     @patch("gerrit_mcp_server.main.run_curl", new_callable=AsyncMock)
     def test_list_change_comments_range_same_line(self, mock_run_curl):
-        """Range comment on a text selection within a single line shows char offsets."""
+        """Range comment on a text selection within a single line shows char offsets and selected text."""
         async def run_test():
             change_id = "55001"
-            mock_response = {
+            mock_comments = {
                 "src/foo.py": [
                     {
                         "id": "rangeabc01",
@@ -199,7 +199,19 @@ class TestListChangeComments(unittest.TestCase):
                     }
                 ]
             }
-            mock_run_curl.return_value = json.dumps(mock_response)
+            # 7 lines of file content; line 7 chars 4-12 = "selected"
+            file_content = "line1\nline2\nline3\nline4\nline5\nline6\ndef selected_function():\n"
+            import base64
+            file_content_b64 = base64.b64encode(file_content.encode()).decode()
+
+            async def side_effect(args, base_url):
+                if "/comments" in args[0]:
+                    return json.dumps(mock_comments)
+                if "/content" in args[0]:
+                    return file_content_b64
+                return ""
+
+            mock_run_curl.side_effect = side_effect
 
             result = await main.list_change_comments(
                 change_id, gerrit_base_url="https://my-gerrit.com"
@@ -207,6 +219,7 @@ class TestListChangeComments(unittest.TestCase):
 
             text = result[0]["text"]
             self.assertIn("L7 (chars 4-12)", text)
+            self.assertIn('"selected', text)
             self.assertIn("Remove this word.", text)
             self.assertIn("(id: rangeabc01)", text)
 
@@ -214,10 +227,10 @@ class TestListChangeComments(unittest.TestCase):
 
     @patch("gerrit_mcp_server.main.run_curl", new_callable=AsyncMock)
     def test_list_change_comments_range_multi_line(self, mock_run_curl):
-        """Range comment spanning multiple lines shows start/end line and char offsets."""
+        """Range comment spanning multiple lines shows start/end line and char offsets with selected text."""
         async def run_test():
             change_id = "55002"
-            mock_response = {
+            mock_comments = {
                 "src/bar.py": [
                     {
                         "id": "rangexyz02",
@@ -235,7 +248,19 @@ class TestListChangeComments(unittest.TestCase):
                     }
                 ]
             }
-            mock_run_curl.return_value = json.dumps(mock_response)
+            # 10 lines; lines 8-10 chars 2-5 spans multiple lines
+            file_content = "l1\nl2\nl3\nl4\nl5\nl6\nl7\n  line8_content\n  line9_content\n  line10_content\n"
+            import base64
+            file_content_b64 = base64.b64encode(file_content.encode()).decode()
+
+            async def side_effect(args, base_url):
+                if "/comments" in args[0]:
+                    return json.dumps(mock_comments)
+                if "/content" in args[0]:
+                    return file_content_b64
+                return ""
+
+            mock_run_curl.side_effect = side_effect
 
             result = await main.list_change_comments(
                 change_id, gerrit_base_url="https://my-gerrit.com"
@@ -244,6 +269,7 @@ class TestListChangeComments(unittest.TestCase):
             text = result[0]["text"]
             self.assertIn("L8:2-L10:5", text)
             self.assertIn("Simplify this block.", text)
+            self.assertIn("  line9_content", text)
 
         asyncio.run(run_test())
 
