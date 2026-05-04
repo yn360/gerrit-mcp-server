@@ -546,7 +546,6 @@ async def get_file_diff(
     return [{"type": "text", "text": diff_text}]
 
 
-@mcp.tool()
 async def _fetch_file_lines(
     base_url: str, change_id: str, file_path: str
 ) -> Optional[List[str]]:
@@ -582,6 +581,7 @@ def _extract_selected_text(
     return "\n".join(selected)
 
 
+@mcp.tool()
 async def list_change_comments(
     change_id: str, gerrit_base_url: Optional[str] = None
 ):
